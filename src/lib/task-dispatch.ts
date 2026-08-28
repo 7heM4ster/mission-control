@@ -1205,6 +1205,13 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
     LEFT JOIN projects p ON p.id = t.project_id AND p.workspace_id = t.workspace_id
     WHERE t.status = 'assigned'
       AND t.assigned_to IS NOT NULL
+      -- 2026-08-28: agents registered by Pandora (source='pandora-worker') are
+      -- executed by Pandora's own worker loop, which polls MC for assigned
+      -- tasks. They exist here so requeueStaleTasks sees them as online (their
+      -- heartbeat keeps last_seen fresh). MC must NOT dispatch to them itself:
+      -- with no OpenClaw binary and no API key that path failed 109 tasks in
+      -- one night ("spawn openclaw ENOENT").
+      AND COALESCE(a.source, '') != 'pandora-worker'
     ORDER BY
       CASE t.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END ASC,
       t.created_at ASC
