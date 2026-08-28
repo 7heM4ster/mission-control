@@ -1139,8 +1139,13 @@ export async function requeueStaleTasks(): Promise<{ ok: boolean; message: strin
     const newAttempts = (task.dispatch_attempts ?? 0) + 1
 
     if (newAttempts >= maxDispatchRetries) {
-      db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ? WHERE id = ?')
-        .run('failed', `Task stuck in_progress ${newAttempts} times — agent "${task.assigned_to}" offline. Moved to failed.`, newAttempts, now, task.id)
+      // Atomically claim the task for failure: only transition from
+      // in_progress to failed if status still matches. Another scheduler
+      // may have already moved it. If UPDATE reports 0 changes, skip silently.
+      const update = db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ? WHERE id = ? AND status = ?')
+        .run('failed', `Task stuck in_progress ${newAttempts} times — agent "${task.assigned_to}" offline. Moved to failed.`, newAttempts, now, task.id, 'in_progress')
+
+      if (update.changes === 0) continue
 
       eventBus.broadcast('task.status_changed', {
         id: task.id,
@@ -1153,8 +1158,13 @@ export async function requeueStaleTasks(): Promise<{ ok: boolean; message: strin
       syncAndEscalateIfFailed(task as any, 'failed', `Task stuck in_progress ${newAttempts} times`, newAttempts)
       failed++
     } else {
-      db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ? WHERE id = ?')
-        .run('assigned', `Requeued: agent "${task.assigned_to}" went offline while task was in_progress`, newAttempts, now, task.id)
+      // Atomically claim the task for requeue: only transition from
+      // in_progress to assigned if status still matches. If another
+      // scheduler already moved it, skip silently (no double-requeue).
+      const update = db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ? WHERE id = ? AND status = ?')
+        .run('assigned', `Requeued: agent "${task.assigned_to}" went offline while task was in_progress`, newAttempts, now, task.id, 'in_progress')
+
+      if (update.changes === 0) continue
 
       // Add a comment explaining the requeue
       db.prepare(`
@@ -1219,11 +1229,13 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
     // Atomically claim the task: only flip to in_progress if it's still
     // 'assigned'. If two dispatchers race (e.g. two Pandora workers
     // polling concurrently), exactly one UPDATE will report changes=1
-    // and the loser falls through to the next task. Without this
-    // guard, both could call into the gateway and double-execute.
-    const claim = db
-      .prepare("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = 'assigned'")
-      .run('in_progress', now, task.id)
+    // and the loser falls through to the next task. Wrapped in transaction
+    // to ensure serialization across scheduler restarts.
+    const claim = db.transaction(() =>
+      db
+        .prepare("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = 'assigned'")
+        .run('in_progress', now, task.id)
+    )()
 
     if (claim.changes === 0) {
       // Another dispatcher won the race (or the task was cancelled

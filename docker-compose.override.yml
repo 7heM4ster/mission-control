@@ -1,0 +1,7 @@
+services:
+  mission-control:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1g  # was 2g (2026-08-18 rebalance)

@@ -258,19 +258,22 @@ function detectOpenClaw(): RuntimeStatus {
     installed = true
   }
 
-  // Try to get version
-  try {
-    const result = require('node:child_process').spawnSync(
-      config.openclawBin || 'openclaw',
-      ['--version'],
-      { stdio: 'pipe', timeout: 3000 }
-    )
-    if (result.status === 0) {
-      installed = true
-      version = (result.stdout?.toString() || '').trim() || null
+  // Try to get version — only if the binary path is likely to exist
+  const openclawBin = config.openclawBin || 'openclaw'
+  if (openclawBin && (openclawBin.includes('/') ? existsSync(openclawBin) : true)) {
+    try {
+      const result = require('node:child_process').spawnSync(
+        openclawBin,
+        ['--version'],
+        { stdio: 'pipe', timeout: 3000 }
+      )
+      if (result.status === 0) {
+        installed = true
+        version = (result.stdout?.toString() || '').trim() || null
+      }
+    } catch {
+      // binary not found — silently ignore (ENOENT is expected if not installed)
     }
-  } catch {
-    // binary not found
   }
 
   // Check if gateway port is listening (simple sync check)
@@ -370,6 +373,9 @@ function detectBinary(bins: string[], versionFlag = '--version'): { installed: b
   }
 
   for (const bin of candidates) {
+    // Skip absolute paths that don't exist to avoid ENOENT spawn errors
+    if (bin.includes('/') && !existsSync(bin)) continue
+
     try {
       const result = spawnSync(bin, [versionFlag], { stdio: 'pipe', timeout: 3000 })
       if (result.status === 0) {

@@ -105,7 +105,11 @@ export async function GET(request: NextRequest) {
       })
     }
 
-    // Atomic claim: single UPDATE with subquery to eliminate SELECT-UPDATE race condition.
+    // Atomic claim: single UPDATE with conditional WHERE to eliminate scheduler race.
+    // The WHERE clause must check status both in the subquery AND in the outer UPDATE
+    // to ensure the task status hasn't changed between subquery execution and the UPDATE.
+    // Without the outer status check, two concurrent claims could both see the same task
+    // in the subquery and both attempt to update it, with the second silently succeeding.
     const claimed = db.prepare(`
       UPDATE tasks
       SET status = 'in_progress', assigned_to = ?, updated_at = ?
@@ -117,6 +121,7 @@ export async function GET(request: NextRequest) {
         ORDER BY ${priorityRankSql()} ASC, due_date ASC NULLS LAST, created_at ASC
         LIMIT 1
       )
+      AND status IN ('assigned', 'inbox')
       RETURNING *
     `).get(agent, now, workspaceId, agent) as any | undefined
 
